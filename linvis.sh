@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
 # =========================================================
-# LinVis 一键 Reality + WARP（美国出口）自动安装脚本
+# LinVis 一键 Reality + WARP（美国出口，带安全自检）自动安装脚本 v2
 #
 # 作者：你自己（GitHub: woaixiaoyur）
 # 功能：
 #   - 自动安装依赖（curl / wget / jq / wireguard-tools 等）
 #   - 自动安装 sing-box 最新版（官方脚本）
-#   - 自动安装 & 配置 Cloudflare WARP（wgcf，全局代理，出口锁美国）
+#   - 自动安装 & 配置 Cloudflare WARP（wgcf）
+#   - 启用 WARP 后自动测试，如果机房不支持 WARP 会自动关闭，避免 VPS 断网
 #   - 自动生成 VLESS Reality 节点（端口 4433，SNI: www.apple.com）
 #   - 自动写入 config.json，重启 sing-box
 #   - 自动开启 BBR + 网络优化 + 1G swap
 #   - 自动打印：小火箭节点信息 + vless:// 链接 + Clash Meta 节点片段
 #
-# 使用模式：
-#   你（中国） -> 美国 VPS(Reality) -> VPS 全局 WARP -> TikTok / YouTube / Netflix / GPT
+# 使用模式（WARP 可用时）：
+#   你（中国） -> 美国 VPS(Reality) -> VPS WARP 出口 -> TikTok / YouTube / Netflix / GPT
 #
 # 适配：
-#   - Debian / Ubuntu（推荐用美国机房 VPS）
+#   - Ubuntu 24.04 / 22.04 / 20.04
+#   - Debian 11 / 12
 #
 # 一键使用示例（上传到 GitHub 后）：
 #   bash <(curl -Ls https://raw.githubusercontent.com/woaixiaoyur/linvis/main/linvis.sh)
@@ -29,6 +31,9 @@ META_INFO="/usr/local/etc/sing-box/linvis_meta.conf"
 
 REALITY_PORT=4433
 REALITY_SNI="www.apple.com"
+
+# 记录 WARP 是否最终启用成功（0=未启用/失败，1=已启用）
+WARP_ENABLED=0
 
 color_green(){ echo -e "\e[32m$1\e[0m"; }
 color_red(){ echo -e "\e[31m$1\e[0m"; }
@@ -56,7 +61,7 @@ echo
 }
 
 install_deps(){
-  color_blue ">>> 安装基础依赖（curl / wget / jq / wireguard-tools / resolvconf）..."
+  color_blue ">>> 安装基础依赖（curl / wget / jq / wireguard-tools / resolvconf 等）..."
   if command -v apt >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt update -y || true
@@ -145,18 +150,33 @@ setup_warp_wgcf(){
   mkdir -p /etc/wireguard
   cp wgcf-profile.conf /etc/wireguard/wgcf.conf
 
-  # 全局流量走 WARP
-  sed -i 's#^AllowedIPs = .*#AllowedIPs = 0.0.0.0/0, ::/0#' /etc/wireguard/wgcf.conf || true
+  # 这里保持 wgcf 默认的 AllowedIPs = 0.0.0.0/0, ::/0
+  # 但我们会在启动后自动做连通性检测，如果机房不支持 WARP，会立即关闭 wgcf，避免 VPS 断网。
 
   color_blue ">>> 启动 WARP 接口（wgcf，全局出口）..."
   wg-quick down wgcf 2>/dev/null || true
-  wg-quick up wgcf
+  wg-quick up wgcf || {
+    color_red "❌ WARP 接口启动失败，跳过 WARP，继续使用原机房出口。"
+    WARP_ENABLED=0
+    return
+  }
 
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl enable wg-quick@wgcf --now || true
+  # 等几秒让路由生效
+  sleep 5
+
+  color_blue ">>> 测试 WARP 启用后的网络连通性..."
+  if ping -c 2 -W 3 1.1.1.1 >/dev/null 2>&1; then
+    color_green "✅ WARP 连通性测试通过，已启用为出口。"
+    WARP_ENABLED=1
+  else
+    color_red "❌ WARP 启用后网络不可用，当前机房可能不支持 WARP，立即关闭 WARP，避免 VPS 断网。"
+    wg-quick down wgcf 2>/dev/null || true
+    WARP_ENABLED=0
   fi
 
-  color_green "✅ WARP (wgcf) 已启用为全局出口。"
+  if command -v systemctl >/dev/null 2>&1 && [ "$WARP_ENABLED" -eq 1 ]; then
+    systemctl enable wg-quick@wgcf --now || true
+  fi
 }
 
 generate_reality_config(){
@@ -333,10 +353,14 @@ print_result(){
   VPS_IP=$(get_current_ip)
 
   echo
-  color_green "================= 当前 VPS 出口 IP（应为 WARP 美国） ================="
+  color_green "================= 当前 VPS 出口 IP ================="
   echo "出口 IP：$VPS_IP"
-  echo "（建议在浏览器用 iplocation.net / ipinfo.io 再确认是否在美国）"
-  echo "======================================================================"
+  if [ "$WARP_ENABLED" -eq 1 ]; then
+    echo "状态：已启用 WARP（建议用 ipinfo.io / iplocation.net 确认是否为美国出口）"
+  else
+    echo "状态：未启用 WARP，使用的是 VPS 原生机房出口。"
+  fi
+  echo "====================================================="
   echo
 
   VLESS_URL="vless://${UUID}@${VPS_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUB_KEY}&sid=${SHORT_ID}&type=tcp#LinVis-US-WARP"
@@ -381,14 +405,14 @@ EOF
   color_yellow "说明："
   echo "  - 小火箭：添加节点 → 粘贴 vless:// 链接 即可导入。"
   echo "  - OpenWrt / Passwall / Clash：把上面的节点片段加到节点列表里即可。"
-  echo "  - TikTok / YouTube / GPT 等流量将走：VPS -> WARP 美国出口。"
+  echo "  - 如果上面状态显示“未启用 WARP”，说明当前机房不支持 WARP，可以换一台 VPS 再尝试。"
   echo
 }
 
 main(){
   check_root
   ascii_logo
-  color_green "===== LinVis 一键 Reality + WARP（美国出口）开始执行 ====="
+  color_green "===== LinVis 一键 Reality + WARP（安全自检版）开始执行 ====="
 
   install_deps
   install_singbox
@@ -401,4 +425,3 @@ main(){
 }
 
 main
-
