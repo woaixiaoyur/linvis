@@ -1,48 +1,42 @@
 #!/usr/bin/env bash
 # =========================================================
-# LinVis 一键 Reality + WARP（美国出口，带安全自检）自动安装脚本 v2
+# LinVis 一键 Reality + WARP（带菜单）安装脚本 v3
+# 适配：Ubuntu / Debian（推荐 Ubuntu 24.04）
+# 仓库：github.com/woaixiaoyur/linvis
 #
-# 作者：你自己（GitHub: woaixiaoyur）
 # 功能：
-#   - 自动安装依赖（curl / wget / jq / wireguard-tools 等）
-#   - 自动安装 sing-box 最新版（官方脚本）
-#   - 自动安装 & 配置 Cloudflare WARP（wgcf）
-#   - 启用 WARP 后自动测试，如果机房不支持 WARP 会自动关闭，避免 VPS 断网
+#   - 自动安装依赖
+#   - 自动安装 sing-box
+#   - 自动安装 & 配置 Cloudflare WARP (wgcf)，带连通性检测
 #   - 自动生成 VLESS Reality 节点（端口 4433，SNI: www.apple.com）
 #   - 自动写入 config.json，重启 sing-box
 #   - 自动开启 BBR + 网络优化 + 1G swap
-#   - 自动打印：小火箭节点信息 + vless:// 链接 + Clash Meta 节点片段
-#
-# 使用模式（WARP 可用时）：
-#   你（中国） -> 美国 VPS(Reality) -> VPS WARP 出口 -> TikTok / YouTube / Netflix / GPT
-#
-# 适配：
-#   - Ubuntu 24.04 / 22.04 / 20.04
-#   - Debian 11 / 12
-#
-# 一键使用示例（上传到 GitHub 后）：
-#   bash <(curl -Ls https://raw.githubusercontent.com/woaixiaoyur/linvis/main/linvis.sh)
+#   - 自动安装 linvis 菜单到 /usr/local/bin/linvis
+#   - 支持参数：
+#         无参数   -> 完整安装 / 重装
+#         regen    -> 只重新生成 Reality 节点
 # =========================================================
 
 set -e
 
 SINGBOX_CONFIG="/usr/local/etc/sing-box/config.json"
 META_INFO="/usr/local/etc/sing-box/linvis_meta.conf"
+MENU_BIN="/usr/local/bin/linvis"
 
 REALITY_PORT=4433
 REALITY_SNI="www.apple.com"
 
-# 记录 WARP 是否最终启用成功（0=未启用/失败，1=已启用）
+# 记录 WARP 是否启用成功（0=未启用/失败，1=已启用）
 WARP_ENABLED=0
 
-color_green(){ echo -e "\e[32m$1\e[0m"; }
-color_red(){ echo -e "\e[31m$1\e[0m"; }
-color_yellow(){ echo -e "\e[33m$1\e[0m"; }
-color_blue(){ echo -e "\e[36m$1\e[0m"; }
+green(){ echo -e "\e[32m$1\e[0m"; }
+red(){ echo -e "\e[31m$1\e[0m"; }
+yellow(){ echo -e "\e[33m$1\e[0m"; }
+cyan(){ echo -e "\e[36m$1\e[0m"; }
 
 check_root() {
   if [ "$(id -u)" -ne 0 ]; then
-    color_red "❌ 请用 root 运行本脚本（先执行：sudo -i）。"
+    red "❌ 请用 root 运行本脚本（先执行：sudo -i）。"
     exit 1
   fi
 }
@@ -61,31 +55,31 @@ echo
 }
 
 install_deps(){
-  color_blue ">>> 安装基础依赖（curl / wget / jq / wireguard-tools / resolvconf 等）..."
+  cyan ">>> 安装基础依赖（curl / wget / jq / wireguard-tools 等）..."
   if command -v apt >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt update -y || true
     apt install -y curl wget jq wireguard-tools resolvconf iproute2 gnupg lsb-release ca-certificates grep sed coreutils || true
   else
-    color_red "❌ 未检测到 apt，本脚本目前只适配 Debian / Ubuntu 系。"
+    red "❌ 未检测到 apt，本脚本目前只适配 Debian / Ubuntu 系。"
     exit 1
   fi
-  color_green "✅ 基础依赖安装完成。"
+  green "✅ 依赖安装完成。"
 }
 
 install_singbox(){
   if command -v sing-box >/dev/null 2>&1; then
-    color_green "✅ 已检测到 sing-box：$(command -v sing-box)"
+    green "✅ 已检测到 sing-box：$(command -v sing-box)"
   else
-    color_blue ">>> 通过官方脚本安装 sing-box ..."
+    cyan ">>> 通过官方脚本安装 sing-box ..."
     curl -fsSL https://sing-box.app/install.sh | sh
   fi
 
   if systemctl list-unit-files | grep -q sing-box; then
     systemctl enable sing-box --now
-    color_green "✅ sing-box 服务已启用并启动。"
+    green "✅ sing-box 服务已启用并启动。"
   else
-    color_yellow "⚠️ 未发现 sing-box systemd 服务（可能安装方式不同），请稍后手动检查。"
+    yellow "⚠️ 未发现 sing-box systemd 服务（可能安装方式不同），请稍后手动检查。"
   fi
 
   mkdir -p "$(dirname "$SINGBOX_CONFIG")"
@@ -93,18 +87,18 @@ install_singbox(){
 
 install_wgcf(){
   if command -v wgcf >/dev/null 2>&1; then
-    color_green "✅ 已检测到 wgcf：$(command -v wgcf)"
+    green "✅ 已检测到 wgcf：$(command -v wgcf)"
     return
   fi
 
-  color_blue ">>> 安装 wgcf（Cloudflare WARP CLI）..."
+  cyan ">>> 安装 wgcf（Cloudflare WARP CLI）..."
   local arch file_keyword download_url
   arch=$(uname -m)
   case "$arch" in
     x86_64|amd64) file_keyword="linux_amd64" ;;
     aarch64|arm64) file_keyword="linux_arm64" ;;
     *)
-      color_red "❌ 暂不支持此 CPU 架构：$arch"
+      red "❌ 暂不支持此 CPU 架构：$arch"
       exit 1
       ;;
   esac
@@ -113,7 +107,7 @@ install_wgcf(){
     | grep browser_download_url | grep "$file_keyword" | cut -d '"' -f4 | head -n1)
 
   if [ -z "$download_url" ]; then
-    color_red "❌ 无法获取 wgcf 下载链接，请稍后重试。"
+    red "❌ 无法获取 wgcf 下载链接，请稍后重试。"
     exit 1
   fi
 
@@ -121,11 +115,11 @@ install_wgcf(){
   chmod +x /usr/local/bin/wgcf
 
   if ! wgcf -h >/dev/null 2>&1; then
-    color_red "❌ wgcf 安装失败，请检查网络或稍后重试。"
+    red "❌ wgcf 安装失败，请检查网络或稍后重试。"
     exit 1
   fi
 
-  color_green "✅ wgcf 安装完成。"
+  green "✅ wgcf 安装完成。"
 }
 
 setup_warp_wgcf(){
@@ -134,42 +128,39 @@ setup_warp_wgcf(){
   cd /root
 
   if [ ! -f wgcf-account.toml ]; then
-    color_blue ">>> 注册 Cloudflare WARP 账号（wgcf register）..."
+    cyan ">>> 注册 Cloudflare WARP 账号（wgcf register）..."
     WGCF_ACCEPT_TOS=1 wgcf register || WGCF_ACCEPT_TOS=1 wgcf register
   else
-    color_green "✅ 已存在 wgcf-account.toml，跳过注册。"
+    green "✅ 已存在 wgcf-account.toml，跳过注册。"
   fi
 
   if [ ! -f wgcf-profile.conf ]; then
-    color_blue ">>> 生成 WARP WireGuard 配置（wgcf generate）..."
+    cyan ">>> 生成 WARP WireGuard 配置（wgcf generate）..."
     wgcf generate
   else
-    color_green "✅ 已存在 wgcf-profile.conf，跳过生成。"
+    green "✅ 已存在 wgcf-profile.conf，跳过生成。"
   fi
 
   mkdir -p /etc/wireguard
   cp wgcf-profile.conf /etc/wireguard/wgcf.conf
 
-  # 这里保持 wgcf 默认的 AllowedIPs = 0.0.0.0/0, ::/0
-  # 但我们会在启动后自动做连通性检测，如果机房不支持 WARP，会立即关闭 wgcf，避免 VPS 断网。
-
-  color_blue ">>> 启动 WARP 接口（wgcf，全局出口）..."
+  # 先用全局模式启动，后面做连通性检查，不通就立即关闭
+  cyan ">>> 启动 WARP 接口（wgcf，全局出口）..."
   wg-quick down wgcf 2>/dev/null || true
-  wg-quick up wgcf || {
-    color_red "❌ WARP 接口启动失败，跳过 WARP，继续使用原机房出口。"
+  if ! wg-quick up wgcf; then
+    red "❌ WARP 接口启动失败，跳过 WARP，继续使用原机房出口。"
     WARP_ENABLED=0
     return
-  }
+  fi
 
-  # 等几秒让路由生效
   sleep 5
 
-  color_blue ">>> 测试 WARP 启用后的网络连通性..."
+  cyan ">>> 测试 WARP 启用后的网络连通性..."
   if ping -c 2 -W 3 1.1.1.1 >/dev/null 2>&1; then
-    color_green "✅ WARP 连通性测试通过，已启用为出口。"
+    green "✅ WARP 连通性测试通过，已启用为出口。"
     WARP_ENABLED=1
   else
-    color_red "❌ WARP 启用后网络不可用，当前机房可能不支持 WARP，立即关闭 WARP，避免 VPS 断网。"
+    red "❌ WARP 启用后网络不可用，当前机房可能不支持 WARP，立即关闭 WARP，避免 VPS 断网。"
     wg-quick down wgcf 2>/dev/null || true
     WARP_ENABLED=0
   fi
@@ -181,7 +172,7 @@ setup_warp_wgcf(){
 
 generate_reality_config(){
   if ! command -v sing-box >/dev/null 2>&1; then
-    color_red "❌ 未检测到 sing-box，请先安装 sing-box。"
+    red "❌ 未检测到 sing-box，请先安装 sing-box。"
     exit 1
   fi
 
@@ -190,22 +181,22 @@ generate_reality_config(){
   local UUID KEYS_JSON PRIV_KEY PUB_KEY SHORT_ID
   UUID=$(cat /proc/sys/kernel/random/uuid)
 
-  color_blue ">>> 生成 Reality 密钥对..."
+  cyan ">>> 生成 Reality 密钥对..."
   KEYS_JSON=$(sing-box generate reality-keypair)
   PRIV_KEY=$(echo "$KEYS_JSON"  | grep -oP '"private_key"\s*:\s*"\K[^"]+')
   PUB_KEY=$(echo "$KEYS_JSON"   | grep -oP '"public_key"\s*:\s*"\K[^"]+')
   SHORT_ID=$(echo "$KEYS_JSON"  | grep -oP '"short_id"\s*:\s*"\K[^"]+')
 
   if [ -z "$PRIV_KEY" ] || [ -z "$PUB_KEY" ] || [ -z "$SHORT_ID" ]; then
-    color_red "❌ Reality 密钥生成失败，请手动执行：sing-box generate reality-keypair 查看报错。"
+    red "❌ Reality 密钥生成失败，请手动执行：sing-box generate reality-keypair 查看报错。"
     exit 1
   fi
 
-  color_green "UUID     : $UUID"
-  color_green "PubKey   : $PUB_KEY"
-  color_green "ShortID  : $SHORT_ID"
+  green "UUID     : $UUID"
+  green "PubKey   : $PUB_KEY"
+  green "ShortID  : $SHORT_ID"
 
-  color_blue ">>> 写入 sing-box 配置：$SINGBOX_CONFIG"
+  cyan ">>> 写入 sing-box 配置：$SINGBOX_CONFIG"
 
   cat > "$SINGBOX_CONFIG" <<EOF
 {
@@ -288,14 +279,14 @@ EOF
 
   if systemctl list-unit-files | grep -q sing-box; then
     systemctl restart sing-box || true
-    color_green "✅ sing-box 配置已应用并重启。"
+    green "✅ sing-box 配置已应用并重启。"
   else
-    color_yellow "⚠️ 未发现 sing-box systemd 服务，请稍后手动确认。"
+    yellow "⚠️ 未发现 sing-box systemd 服务，请稍后手动确认。"
   fi
 }
 
 enable_bbr_and_optimize(){
-  color_blue ">>> 写入 BBR + 网络优化参数..."
+  cyan ">>> 写入 BBR + 网络优化参数..."
 
   cat <<EOF >> /etc/sysctl.conf
 
@@ -318,19 +309,26 @@ net.ipv4.ip_local_port_range = 1024 65535
 EOF
 
   sysctl -p || true
-  color_green "✅ BBR & sysctl 已应用（内核支持的话会启用 BBR）。"
+  green "✅ BBR & sysctl 已应用（内核支持的话会启用 BBR）。"
 
   if ! grep -q "swap" /etc/fstab && [ -z "$(swapon --noheadings 2>/dev/null)" ]; then
-    color_blue ">>> 未检测到 swap，创建 1G swap 提升稳定性..."
+    cyan ">>> 未检测到 swap，创建 1G swap 提升稳定性..."
     fallocate -l 1G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=1024
     chmod 600 /swapfile
     mkswap /swapfile
     swapon /swapfile
     echo '/swapfile none swap sw 0 0' >> /etc/fstab
-    color_green "✅ 已创建 1G swap。"
+    green "✅ 已创建 1G swap。"
   else
-    color_green "✅ 已存在 swap，跳过创建。"
+    green "✅ 已存在 swap，跳过创建。"
   fi
+}
+
+install_menu(){
+  cyan ">>> 安装 LinVis 控制台菜单到 /usr/local/bin/linvis ..."
+  curl -fsSL https://raw.githubusercontent.com/woaixiaoyur/linvis/main/linvis-menu.sh -o "$MENU_BIN"
+  chmod +x "$MENU_BIN"
+  green "✅ 安装完成。以后可直接运行：linvis  打开菜单。"
 }
 
 get_current_ip(){
@@ -343,7 +341,7 @@ get_current_ip(){
 
 print_result(){
   if [ ! -f "$META_INFO" ]; then
-    color_red "❌ 找不到元数据文件：$META_INFO"
+    red "❌ 找不到元数据文件：$META_INFO"
     return
   fi
 
@@ -353,7 +351,7 @@ print_result(){
   VPS_IP=$(get_current_ip)
 
   echo
-  color_green "================= 当前 VPS 出口 IP ================="
+  green "================= 当前 VPS 出口 IP ================="
   echo "出口 IP：$VPS_IP"
   if [ "$WARP_ENABLED" -eq 1 ]; then
     echo "状态：已启用 WARP（建议用 ipinfo.io / iplocation.net 确认是否为美国出口）"
@@ -365,7 +363,7 @@ print_result(){
 
   VLESS_URL="vless://${UUID}@${VPS_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUB_KEY}&sid=${SHORT_ID}&type=tcp#LinVis-US-WARP"
 
-  color_green "================= Shadowrocket / 小火箭 节点信息 ================="
+  green "================= Shadowrocket / 小火箭 节点信息 ================="
   echo "名称：LinVis-US-WARP"
   echo "类型：VLESS"
   echo "地址：$VPS_IP"
@@ -384,7 +382,7 @@ print_result(){
   echo "==================================================================="
   echo
 
-  color_green "================= Clash Meta / 软路由 节点片段 ==================="
+  green "================= Clash Meta / 软路由 节点片段 ==================="
   cat <<EOF
 - name: "LinVis-US-WARP-Reality"
   type: vless
@@ -402,26 +400,44 @@ print_result(){
 EOF
   echo "==================================================================="
   echo
-  color_yellow "说明："
+  yellow "说明："
   echo "  - 小火箭：添加节点 → 粘贴 vless:// 链接 即可导入。"
   echo "  - OpenWrt / Passwall / Clash：把上面的节点片段加到节点列表里即可。"
   echo "  - 如果上面状态显示“未启用 WARP”，说明当前机房不支持 WARP，可以换一台 VPS 再尝试。"
   echo
 }
 
-main(){
+main_full(){
   check_root
   ascii_logo
-  color_green "===== LinVis 一键 Reality + WARP（安全自检版）开始执行 ====="
+  green "===== LinVis 一键 Reality + WARP（带菜单）开始执行 ====="
 
   install_deps
   install_singbox
   setup_warp_wgcf
   generate_reality_config
   enable_bbr_and_optimize
+  install_menu
   print_result
 
-  color_green "===== 全部执行完成，可以在小火箭 / 软路由中添加节点使用了 ====="
+  green "===== 全部执行完成，可以在小火箭 / 软路由中添加节点了 ====="
+  green "===== 以后可直接运行：linvis 打开控制台菜单 ====="
 }
 
-main
+main_regen(){
+  check_root
+  ascii_logo
+  yellow ">>> 重新生成 Reality 节点（保留 WARP / 优化设置）..."
+  generate_reality_config
+  print_result
+}
+
+# --- 参数分发 ---
+case "$1" in
+  regen)
+    main_regen
+    ;;
+  *)
+    main_full
+    ;;
+esac
